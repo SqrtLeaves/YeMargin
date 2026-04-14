@@ -32,7 +32,6 @@ impl AppState {
 }
 
 // 重新导出命令
-pub use pdf::commands::load_pdf;
 pub use pdf::commands::get_pdf_pages_info;
 pub use pdf::commands::render_pdf_page;
 pub use pdf::commands::read_pdf_bytes;

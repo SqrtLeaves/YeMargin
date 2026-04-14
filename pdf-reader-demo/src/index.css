@@ -304,6 +304,31 @@ html, body, #root {
   background: var(--text-secondary);
 }
 
+/* PDF 文本层 */
+.pdf-text-layer {
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+
+.pdf-text-layer span {
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+
+.pdf-text-layer span::selection {
+  background: rgba(0, 120, 255, 0.35);
+}
+
+[data-theme="dark"] .pdf-text-layer span::selection {
+  background: rgba(80, 160, 255, 0.5);
+}
+
+[data-theme="sepia"] .pdf-text-layer span::selection {
+  background: rgba(160, 120, 60, 0.4);
+}
+
 /* 缩放控制 */
 .zoom-control {
   display: flex;

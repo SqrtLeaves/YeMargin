@@ -4,12 +4,6 @@ use crate::AppState;
 use super::*;
 use std::fs;
 
-// 加载 PDF 命令
-#[tauri::command]
-pub fn load_pdf(path: String) -> Result<PdfDocumentInfo, String> {
-    get_document_info(&path).map_err(|e| e.to_string())
-}
-
 // 获取 PDF 页面信息
 #[tauri::command]
 pub fn get_pdf_pages_info(state: State<AppState>, path: String) -> Result<Vec<PageInfo>, String> {
@@ -89,10 +83,11 @@ pub fn render_pdf_page(
     Ok(result)
 }
 
-// 读取 PDF 文件内容为字节数组
+// 读取 PDF 文件内容为字节数组（以二进制 Response 返回，避免 JSON 序列化开销）
 #[tauri::command]
-pub fn read_pdf_bytes(path: String) -> Result<Vec<u8>, String> {
-    fs::read(&path).map_err(|e| e.to_string())
+pub fn read_pdf_bytes(path: String) -> Result<tauri::ipc::Response, String> {
+    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 // 提取页面文本（用于搜索功能）

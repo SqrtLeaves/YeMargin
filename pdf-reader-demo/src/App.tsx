@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '@/stores/appStore';
+import { pdfjsLib } from '@/lib/pdfjs';
 import PDFViewer from '@/components/PDFViewer';
 import Sidebar from '@/components/Sidebar';
 import Toolbar from '@/components/Toolbar';
@@ -10,6 +11,7 @@ import './App.css';
 
 function App() {
   const [isLoading, setIsLoading] = useState(false);
+  const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
   const { 
     currentDocument, 
     openDocument, 
@@ -21,6 +23,24 @@ function App() {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', settings.theme);
   }, [settings.theme]);
+
+  // 当切换文档或恢复当前文档时，自动读取 PDF bytes
+  useEffect(() => {
+    const loadBytes = async () => {
+      if (!currentDocument) {
+        setPdfBytes(null);
+        return;
+      }
+      try {
+        const arr = await invoke<ArrayBuffer>('read_pdf_bytes', { path: currentDocument.path });
+        setPdfBytes(new Uint8Array(arr));
+      } catch (err) {
+        console.error('Failed to read PDF bytes:', err);
+        setPdfBytes(null);
+      }
+    };
+    loadBytes();
+  }, [currentDocument?.path]);
 
   // 打开 PDF 文件
   const handleOpenFile = async () => {
@@ -37,30 +57,32 @@ function App() {
 
       setIsLoading(true);
       
-      // 调用 Rust 后端加载 PDF
-      const result = await invoke<{
-        id: string;
-        path: string;
-        name: string;
-        page_count: number;
-      }>('load_pdf', {
-        path: selected
-      });
+      // 读取文件字节
+      const arr = await invoke<ArrayBuffer>('read_pdf_bytes', { path: selected });
+      const bytes = new Uint8Array(arr);
+
+      // 用 PDF.js 解析获取页数（避免调用可能卡住的 load_pdf）
+      const pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+      const pageCount = pdfDoc.numPages;
+      pdfDoc.destroy();
+
+      const name = selected.split('/').pop()?.replace(/\.pdf$/i, '') || 'Untitled';
 
       const newDoc: PDFDocument = {
-        id: result.id,
-        path: result.path,
-        name: result.name,
-        pageCount: result.page_count,
+        id: crypto.randomUUID(),
+        path: selected,
+        name,
+        pageCount,
         currentPage: 1,
         scale: settings.defaultScale,
       };
 
+      setPdfBytes(bytes);
       addDocument(newDoc);
       openDocument(newDoc);
     } catch (error) {
       console.error('Failed to open PDF:', error);
-      alert('无法打开 PDF 文件: ' + error);
+      alert('无法打开 PDF 文件: ' + String(error));
     } finally {
       setIsLoading(false);
     }
@@ -76,9 +98,10 @@ function App() {
           isLoading={isLoading}
         />
         
-        {currentDocument ? (
+        {currentDocument && pdfBytes ? (
           <PDFViewer 
             document={currentDocument}
+            bytes={pdfBytes}
             key={currentDocument.id}
           />
         ) : (

@@ -22,7 +22,6 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
-            pdf_reader_demo_lib::load_pdf,
             pdf_reader_demo_lib::get_pdf_pages_info,
             pdf_reader_demo_lib::render_pdf_page,
             pdf_reader_demo_lib::read_pdf_bytes,

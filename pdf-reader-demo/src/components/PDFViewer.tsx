@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '@/stores/appStore';
 import { pdfjsLib } from '@/lib/pdfjs';
 import type { PDFDocument } from '@/types';
@@ -7,9 +6,10 @@ import PDFPageComponent from './PDFPage';
 
 interface PDFViewerProps {
   document: PDFDocument;
+  bytes: Uint8Array;
 }
 
-export default function PDFViewer({ document }: PDFViewerProps) {
+export default function PDFViewer({ document, bytes }: PDFViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const { settings, setCurrentPage, setScale } = useAppStore();
   const [pdfDocument, setPdfDocument] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
@@ -34,9 +34,7 @@ export default function PDFViewer({ document }: PDFViewerProps) {
       setPageProxies(new Map());
 
       try {
-        const bytes = await invoke<number[]>('read_pdf_bytes', { path: document.path });
-        const uint8Array = new Uint8Array(bytes);
-        const loadedDoc = await pdfjsLib.getDocument({ data: uint8Array }).promise;
+        const loadedDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
 
         if (!isMounted) {
           loadedDoc.destroy();
@@ -45,24 +43,35 @@ export default function PDFViewer({ document }: PDFViewerProps) {
 
         setPdfDocument(loadedDoc);
         
-        // Pre-load first few pages
-        const pagesToLoad = Math.min(3, loadedDoc.numPages);
-        const newProxies = new Map<number, pdfjsLib.PDFPageProxy>();
-        for (let i = 1; i <= pagesToLoad; i++) {
-          const page = await loadedDoc.getPage(i);
-          newProxies.set(i, page);
-        }
-        
+        // 先阻塞加载第 1 页（首屏），然后后台并行加载 2-3 页
+        const firstPage = await loadedDoc.getPage(1);
         if (isMounted) {
-          setPageProxies(newProxies);
+          setPageProxies((prev) => {
+            const next = new Map(prev);
+            next.set(1, firstPage);
+            return next;
+          });
+          setIsLoading(false);
+        }
+
+        // 后台并行加载后续页面
+        const pagesToLoad = Math.min(3, loadedDoc.numPages);
+        if (pagesToLoad > 1 && isMounted) {
+          const rest = await Promise.all(
+            Array.from({ length: pagesToLoad - 1 }, (_, i) => loadedDoc.getPage(i + 2))
+          );
+          if (isMounted) {
+            setPageProxies((prev) => {
+              const next = new Map(prev);
+              rest.forEach((page, idx) => next.set(idx + 2, page));
+              return next;
+            });
+          }
         }
       } catch (err) {
         console.error('Failed to load PDF:', err);
         if (isMounted) {
           setError(String(err));
-        }
-      } finally {
-        if (isMounted) {
           setIsLoading(false);
         }
       }
@@ -80,7 +89,7 @@ export default function PDFViewer({ document }: PDFViewerProps) {
         return null;
       });
     };
-  }, [document.path]);
+  }, [bytes]);
 
   // Sync DOM transform when document scale changes (e.g. after commit)
   useEffect(() => {
@@ -248,6 +257,34 @@ export default function PDFViewer({ document }: PDFViewerProps) {
       targetPage.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   }, [document.currentPage]);
+
+  // Ensure copy works for selected text
+  useEffect(() => {
+    const handleCopy = (_e: ClipboardEvent) => {
+      const selection = window.getSelection();
+      if (selection && selection.toString().length > 0) {
+        // Let the native copy event proceed
+        return;
+      }
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'c') {
+        const selection = window.getSelection();
+        if (selection && selection.toString().length > 0) {
+          // Native copy should work; this handler ensures we don't block it
+          return;
+        }
+      }
+    };
+
+    window.document.addEventListener('copy', handleCopy);
+    window.document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.document.removeEventListener('copy', handleCopy);
+      window.document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
 
   // Get background color
   const getBackgroundColor = () => {

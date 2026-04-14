@@ -118,6 +118,7 @@ export default function PDFPageComponent({
       />
       <div
         ref={textLayerRef}
+        className="pdf-text-layer"
         style={{
           position: 'absolute',
           top: 0,

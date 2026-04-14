@@ -1,4 +1,6 @@
 pub mod commands;
+#[cfg(test)]
+mod commands_test;
 
 use pdfium_render::prelude::*;
 use serde::{Deserialize, Serialize};
