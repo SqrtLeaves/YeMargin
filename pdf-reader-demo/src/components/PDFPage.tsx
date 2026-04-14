@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { pdfjsLib } from '@/lib/pdfjs';
+import { pdfjsLib, TextLayerBuilder } from '@/lib/pdfjs';
 
 interface PDFPageProps {
   pdfPage: pdfjsLib.PDFPageProxy;
@@ -19,8 +19,8 @@ export default function PDFPageComponent({
 
     const renderPage = async () => {
       const canvas = canvasRef.current;
-      const textLayer = textLayerRef.current;
-      if (!canvas || !textLayer) return;
+      const textLayerContainer = textLayerRef.current;
+      if (!canvas || !textLayerContainer) return;
 
       // Cancel any previous render
       if (renderTaskRef.current) {
@@ -54,42 +54,18 @@ export default function PDFPageComponent({
 
       if (isCancelled) return;
 
-      // Build text layer
-      const textContent = await pdfPage.getTextContent();
-      textLayer.innerHTML = '';
-      textLayer.style.width = `${viewport.width}px`;
-      textLayer.style.height = `${viewport.height}px`;
+      // Build text layer using PDF.js official TextLayerBuilder
+      textLayerContainer.innerHTML = '';
+      const textLayerBuilder = new TextLayerBuilder({
+        pdfPage,
+      });
 
-      const fragment = document.createDocumentFragment();
+      await textLayerBuilder.render({ viewport, images: null as any });
 
-      for (const item of textContent.items) {
-        if (!('str' in item)) continue;
+      if (isCancelled) return;
 
-        const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-        const fontHeight = Math.hypot(tx[0], tx[1]);
-        const scaleX = fontHeight ? Math.hypot(tx[2], tx[3]) / fontHeight : 1;
-
-        // Skip empty or zero-height text
-        if (!item.str || fontHeight <= 0) continue;
-
-        const span = document.createElement('span');
-        span.textContent = item.str;
-        span.style.position = 'absolute';
-        span.style.left = `${tx[4]}px`;
-        span.style.top = `${tx[5] - fontHeight}px`;
-        span.style.fontSize = `${fontHeight}px`;
-        span.style.fontFamily = 'sans-serif';
-        span.style.whiteSpace = 'pre';
-        span.style.userSelect = 'text';
-        span.style.transform = `scaleX(${scaleX})`;
-        span.style.transformOrigin = 'left bottom';
-        span.style.color = 'transparent';
-        span.style.cursor = 'text';
-
-        fragment.appendChild(span);
-      }
-
-      textLayer.appendChild(fragment);
+      // Append the built text layer into our container
+      textLayerContainer.appendChild(textLayerBuilder.div);
     };
 
     renderPage();
@@ -114,7 +90,13 @@ export default function PDFPageComponent({
     >
       <canvas
         ref={canvasRef}
-        style={{ display: 'block', position: 'absolute', top: 0, left: 0 }}
+        style={{
+          display: 'block',
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          pointerEvents: 'none',
+        }}
       />
       <div
         ref={textLayerRef}
@@ -123,8 +105,10 @@ export default function PDFPageComponent({
           position: 'absolute',
           top: 0,
           left: 0,
+          width: viewport.width,
+          height: viewport.height,
           lineHeight: 1,
-          pointerEvents: 'auto',
+          zIndex: 2,
         }}
       />
     </div>

@@ -305,28 +305,36 @@ html, body, #root {
 }
 
 /* PDF 文本层 */
-.pdf-text-layer {
+.pdf-text-layer,
+.pdf-text-layer .textLayer {
   -webkit-user-select: text;
   user-select: text;
   cursor: text;
 }
 
-.pdf-text-layer span {
+.pdf-text-layer span,
+.pdf-text-layer .textLayer > span {
   -webkit-user-select: text;
   user-select: text;
   cursor: text;
 }
 
-.pdf-text-layer span::selection {
-  background: rgba(0, 120, 255, 0.35);
+.pdf-text-layer span::selection,
+.pdf-text-layer .textLayer > span::selection {
+  background: rgba(0, 120, 255, 0.55) !important;
+  color: black !important;
 }
 
-[data-theme="dark"] .pdf-text-layer span::selection {
-  background: rgba(80, 160, 255, 0.5);
+[data-theme="dark"] .pdf-text-layer span::selection,
+[data-theme="dark"] .pdf-text-layer .textLayer > span::selection {
+  background: rgba(80, 160, 255, 0.7) !important;
+  color: white !important;
 }
 
-[data-theme="sepia"] .pdf-text-layer span::selection {
-  background: rgba(160, 120, 60, 0.4);
+[data-theme="sepia"] .pdf-text-layer span::selection,
+[data-theme="sepia"] .pdf-text-layer .textLayer > span::selection {
+  background: rgba(160, 120, 60, 0.6) !important;
+  color: black !important;
 }
 
 /* 缩放控制 */
