@@ -1,148 +1,131 @@
-import { useEffect, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { useEffect, useRef } from 'react';
+import { pdfjsLib } from '@/lib/pdfjs';
 
 interface PDFPageProps {
-  documentPath: string;
-  pageNumber: number;
-  width: number;
-  height: number;
-  originalWidth: number;
-  originalHeight: number;
+  pdfPage: pdfjsLib.PDFPageProxy;
   scale: number;
-  theme: 'light' | 'dark' | 'sepia';
 }
 
 export default function PDFPageComponent({
-  documentPath,
-  pageNumber,
-  width,
-  height,
-  originalWidth: _originalWidth,
-  originalHeight: _originalHeight,
+  pdfPage,
   scale,
-  theme,
 }: PDFPageProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [isRendering, setIsRendering] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const textLayerRef = useRef<HTMLDivElement>(null);
+  const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
 
   useEffect(() => {
+    let isCancelled = false;
+
     const renderPage = async () => {
       const canvas = canvasRef.current;
-      if (!canvas) return;
+      const textLayer = textLayerRef.current;
+      if (!canvas || !textLayer) return;
 
-      setIsRendering(true);
-      setError(null);
+      // Cancel any previous render
+      if (renderTaskRef.current) {
+        renderTaskRef.current.cancel();
+      }
+
+      const viewport = pdfPage.getViewport({ scale });
+
+      // Set canvas size to match viewport
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      // Clear canvas before rendering
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const renderTask = pdfPage.render({ canvas, canvasContext: ctx, viewport });
+      renderTaskRef.current = renderTask;
 
       try {
-        // 调用 Rust 后端渲染页面为图片
-        const result = await invoke<{
-          data: number[];  // RGBA 数据
-          width: number;
-          height: number;
-        }>('render_pdf_page', {
-          path: documentPath,
-          pageNumber,
-          scale,
-          theme,
-        });
-
-        // 设置 canvas 尺寸
-        canvas.width = result.width;
-        canvas.height = result.height;
-
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          throw new Error('Failed to get canvas context');
-        }
-
-        // 创建 ImageData 并绘制
-        const imageData = new ImageData(
-          new Uint8ClampedArray(result.data),
-          result.width,
-          result.height
-        );
-
-        ctx.putImageData(imageData, 0, 0);
+        await renderTask.promise;
       } catch (err) {
-        console.error(`Failed to render page ${pageNumber}:`, err);
-        setError(String(err));
-      } finally {
-        setIsRendering(false);
+        if ((err as Error).message?.includes('cancelled')) {
+          return;
+        }
+        console.error('Render error:', err);
+        return;
       }
+
+      if (isCancelled) return;
+
+      // Build text layer
+      const textContent = await pdfPage.getTextContent();
+      textLayer.innerHTML = '';
+      textLayer.style.width = `${viewport.width}px`;
+      textLayer.style.height = `${viewport.height}px`;
+
+      const fragment = document.createDocumentFragment();
+
+      for (const item of textContent.items) {
+        if (!('str' in item)) continue;
+
+        const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+        const fontHeight = Math.hypot(tx[0], tx[1]);
+        const scaleX = fontHeight ? Math.hypot(tx[2], tx[3]) / fontHeight : 1;
+
+        // Skip empty or zero-height text
+        if (!item.str || fontHeight <= 0) continue;
+
+        const span = document.createElement('span');
+        span.textContent = item.str;
+        span.style.position = 'absolute';
+        span.style.left = `${tx[4]}px`;
+        span.style.top = `${tx[5] - fontHeight}px`;
+        span.style.fontSize = `${fontHeight}px`;
+        span.style.fontFamily = 'sans-serif';
+        span.style.whiteSpace = 'pre';
+        span.style.userSelect = 'text';
+        span.style.transform = `scaleX(${scaleX})`;
+        span.style.transformOrigin = 'left bottom';
+        span.style.color = 'transparent';
+        span.style.cursor = 'text';
+
+        fragment.appendChild(span);
+      }
+
+      textLayer.appendChild(fragment);
     };
 
     renderPage();
-  }, [documentPath, pageNumber, scale, theme]);
 
-  // 应用主题滤镜（如果需要）
-  const getCanvasStyle = () => {
-    const baseStyle: React.CSSProperties = {
-      display: 'block',
-      width: '100%',
-      height: '100%',
+    return () => {
+      isCancelled = true;
+      if (renderTaskRef.current) {
+        renderTaskRef.current.cancel();
+      }
     };
+  }, [pdfPage, scale]);
 
-    // 根据主题调整显示
-    switch (theme) {
-      case 'dark':
-        return {
-          ...baseStyle,
-          // 可以在这里添加 CSS filter 作为后备方案
-        };
-      case 'sepia':
-        return baseStyle;
-      default:
-        return baseStyle;
-    }
-  };
-
-  if (error) {
-    return (
-      <div
-        style={{
-          width,
-          height,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          background: '#fee',
-          color: '#c33',
-          fontSize: '12px',
-          padding: '20px',
-          textAlign: 'center',
-        }}
-      >
-        页面渲染失败
-        <br />
-        {error}
-      </div>
-    );
-  }
+  const viewport = pdfPage.getViewport({ scale });
 
   return (
-    <div style={{ position: 'relative', width, height }}>
+    <div
+      style={{
+        width: viewport.width,
+        height: viewport.height,
+        position: 'relative',
+      }}
+    >
       <canvas
         ref={canvasRef}
-        style={getCanvasStyle()}
+        style={{ display: 'block', position: 'absolute', top: 0, left: 0 }}
       />
-      {isRendering && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            background: 'rgba(255,255,255,0.9)',
-          }}
-        >
-          <div className="spinner" style={{ width: 24, height: 24, borderWidth: 2 }} />
-        </div>
-      )}
+      <div
+        ref={textLayerRef}
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          lineHeight: 1,
+          pointerEvents: 'auto',
+        }}
+      />
     </div>
   );
 }

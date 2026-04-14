@@ -87,15 +87,15 @@ pub struct RenderConfig {
     pub theme: Theme,
 }
 
-// 渲染 PDF 页面
-pub fn render_page(
+// 渲染 PDF 页面（从已缓存的字节加载）
+pub fn render_page_from_bytes(
     pdfium: &Pdfium,
-    path: &str,
+    bytes: &[u8],
     page_number: u16,
     config: RenderConfig,
 ) -> Result<RenderedPage, PdfiumError> {
     // 加载文档
-    let document = pdfium.load_pdf_from_file(path, None)?;
+    let document = pdfium.load_pdf_from_byte_slice(bytes, None)?;
     
     // 获取页面（页码从 0 开始）
     let page = document.pages().get(page_number - 1)?;
@@ -129,6 +129,18 @@ pub fn render_page(
     })
 }
 
+// 兼容旧接口：直接从文件路径渲染
+pub fn render_page(
+    _pdfium: &Pdfium,
+    path: &str,
+    page_number: u16,
+    config: RenderConfig,
+) -> Result<RenderedPage, PdfiumError> {
+    let pdfium = Pdfium::default();
+    let bytes = std::fs::read(path).map_err(|e| PdfiumError::IoError(e))?;
+    render_page_from_bytes(&pdfium, &bytes, page_number, config)
+}
+
 // 获取文档信息
 pub fn get_document_info(path: &str) -> Result<PdfDocumentInfo, PdfiumError> {
     let pdfium = Pdfium::default();
@@ -149,7 +161,28 @@ pub fn get_document_info(path: &str) -> Result<PdfDocumentInfo, PdfiumError> {
     })
 }
 
-// 获取所有页面的尺寸信息
+// 获取所有页面的尺寸信息（从字节加载，用于后端缓存场景）
+pub fn get_pages_info_from_bytes(
+    pdfium: &Pdfium,
+    bytes: &[u8],
+) -> Result<Vec<PageInfo>, PdfiumError> {
+    let document = pdfium.load_pdf_from_byte_slice(bytes, None)?;
+    
+    let mut pages = Vec::new();
+    for i in 0..document.pages().len() {
+        let page = document.pages().get(i)?;
+        let width = page.width().value;
+        let height = page.height().value;
+        pages.push(PageInfo {
+            width,
+            height,
+        });
+    }
+    
+    Ok(pages)
+}
+
+// 兼容旧接口
 pub fn get_pages_info(path: &str) -> Result<Vec<PageInfo>, PdfiumError> {
     let pdfium = Pdfium::default();
     let document = pdfium.load_pdf_from_file(path, None)?;

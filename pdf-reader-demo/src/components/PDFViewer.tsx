@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '@/stores/appStore';
-import type { PDFDocument, PDFPage } from '@/types';
+import { pdfjsLib } from '@/lib/pdfjs';
+import type { PDFDocument } from '@/types';
 import PDFPageComponent from './PDFPage';
 
 interface PDFViewerProps {
@@ -10,81 +11,136 @@ interface PDFViewerProps {
 
 export default function PDFViewer({ document }: PDFViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const { settings, setCurrentPage } = useAppStore();
-  const [pages, setPages] = useState<PDFPage[]>([]);
-  const [loadedPages, setLoadedPages] = useState<Set<number>>(new Set());
+  const { settings, setCurrentPage, setScale } = useAppStore();
+  const [pdfDocument, setPdfDocument] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
+  const [pageProxies, setPageProxies] = useState<Map<number, pdfjsLib.PDFPageProxy>>(new Map());
   const [isLoading, setIsLoading] = useState(true);
-  const renderQueueRef = useRef<number[]>([]);
-  const isRenderingRef = useRef(false);
+  const [error, setError] = useState<string | null>(null);
+  
+  const pinchTimeoutRef = useRef<number | null>(null);
+  const isGesturingRef = useRef(false);
+  const gestureStartScaleRef = useRef(document.scale);
+  const pendingVisualScaleRef = useRef<number | null>(null);
 
-  // 初始化页面信息
+  const getContainerEl = () => containerRef.current?.querySelector('.pdf-container') as HTMLElement | null;
+
+  // Load PDF bytes and initialize PDF.js document
   useEffect(() => {
-    const initPages = async () => {
+    let isMounted = true;
+
+    const loadPdf = async () => {
       setIsLoading(true);
+      setError(null);
+      setPageProxies(new Map());
+
       try {
-        // 获取所有页面的尺寸
-        const pageInfos = await invoke<Array<{ width: number; height: number }>>(
-          'get_pdf_pages_info',
-          { path: document.path }
-        );
+        const bytes = await invoke<number[]>('read_pdf_bytes', { path: document.path });
+        const uint8Array = new Uint8Array(bytes);
+        const loadedDoc = await pdfjsLib.getDocument({ data: uint8Array }).promise;
 
-        const newPages: PDFPage[] = pageInfos.map((info, index) => ({
-          number: index + 1,
-          width: info.width,
-          height: info.height,
-          rendered: false,
-        }));
+        if (!isMounted) {
+          loadedDoc.destroy();
+          return;
+        }
 
-        setPages(newPages);
+        setPdfDocument(loadedDoc);
         
-        // 优先加载当前页和附近页面
-        const currentPage = document.currentPage;
-        const priorityPages = [
-          currentPage,
-          currentPage - 1,
-          currentPage + 1,
-          currentPage - 2,
-          currentPage + 2,
-        ].filter(p => p >= 1 && p <= newPages.length);
+        // Pre-load first few pages
+        const pagesToLoad = Math.min(3, loadedDoc.numPages);
+        const newProxies = new Map<number, pdfjsLib.PDFPageProxy>();
+        for (let i = 1; i <= pagesToLoad; i++) {
+          const page = await loadedDoc.getPage(i);
+          newProxies.set(i, page);
+        }
         
-        renderQueueRef.current = priorityPages;
-        processRenderQueue();
-      } catch (error) {
-        console.error('Failed to load PDF pages:', error);
+        if (isMounted) {
+          setPageProxies(newProxies);
+        }
+      } catch (err) {
+        console.error('Failed to load PDF:', err);
+        if (isMounted) {
+          setError(String(err));
+        }
       } finally {
-        setIsLoading(false);
+        if (isMounted) {
+          setIsLoading(false);
+        }
       }
     };
 
-    initPages();
-  }, [document.path, document.pageCount]);
+    loadPdf();
 
-  // 处理渲染队列
-  const processRenderQueue = useCallback(async () => {
-    if (isRenderingRef.current || renderQueueRef.current.length === 0) return;
-    
-    isRenderingRef.current = true;
-    
-    while (renderQueueRef.current.length > 0) {
-      const pageNumber = renderQueueRef.current.shift()!;
-      
-      if (loadedPages.has(pageNumber)) continue;
-      
-      try {
-        // 通知页面组件渲染
-        setLoadedPages(prev => new Set(prev).add(pageNumber));
-        
-        // 小延迟让 UI 有机会更新
-        await new Promise(resolve => setTimeout(resolve, 10));
-      } catch (error) {
-        console.error(`Failed to render page ${pageNumber}:`, error);
-      }
+    return () => {
+      isMounted = false;
+      pageProxies.forEach((page) => {
+        try { page.cleanup?.(); } catch {}
+      });
+      setPdfDocument((prev) => {
+        prev?.destroy().catch(() => {});
+        return null;
+      });
+    };
+  }, [document.path]);
+
+  // Sync DOM transform when document scale changes (e.g. after commit)
+  useEffect(() => {
+    const el = getContainerEl();
+    if (el) {
+      el.style.transform = '';
+      el.style.transformOrigin = '';
     }
-    
-    isRenderingRef.current = false;
-  }, [loadedPages]);
+  }, [document.scale]);
 
-  // 滚动处理 - 更新当前页码并加载可见页面
+  // Load visible pages on scroll
+  const loadVisiblePages = useCallback(async () => {
+    if (!pdfDocument || !containerRef.current) return;
+
+    const container = containerRef.current;
+    const containerRect = container.getBoundingClientRect();
+    const pageElements = container.querySelectorAll('.pdf-page-wrapper');
+
+    let maxVisiblePage = 1;
+    let maxVisibleArea = 0;
+    const pagesToLoad: number[] = [];
+
+    pageElements.forEach((el, index) => {
+      const rect = el.getBoundingClientRect();
+      const visibleTop = Math.max(rect.top, containerRect.top);
+      const visibleBottom = Math.min(rect.bottom, containerRect.bottom);
+      const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+      const pageNumber = index + 1;
+
+      if (visibleHeight > maxVisibleArea) {
+        maxVisibleArea = visibleHeight;
+        maxVisiblePage = pageNumber;
+      }
+
+      if (visibleHeight > 0 && !pageProxies.has(pageNumber)) {
+        pagesToLoad.push(pageNumber);
+      }
+    });
+
+    if (maxVisiblePage !== document.currentPage) {
+      setCurrentPage(maxVisiblePage);
+    }
+
+    if (pagesToLoad.length > 0) {
+      const newProxies = new Map(pageProxies);
+      for (const pageNumber of pagesToLoad) {
+        if (!newProxies.has(pageNumber)) {
+          try {
+            const page = await pdfDocument.getPage(pageNumber);
+            newProxies.set(pageNumber, page);
+          } catch (err) {
+            console.error(`Failed to load page ${pageNumber}:`, err);
+          }
+        }
+      }
+      setPageProxies(newProxies);
+    }
+  }, [pdfDocument, pageProxies, document.currentPage, setCurrentPage]);
+
+  // Scroll handler with debounce
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -94,44 +150,7 @@ export default function PDFViewer({ document }: PDFViewerProps) {
     const handleScroll = () => {
       clearTimeout(scrollTimeout);
       scrollTimeout = window.setTimeout(() => {
-        // 计算当前最可见的页面
-        let maxVisiblePage = 1;
-        let maxVisibleArea = 0;
-        
-        const pageElements = container.querySelectorAll('.pdf-page-wrapper');
-        pageElements.forEach((el, index) => {
-          const rect = el.getBoundingClientRect();
-          const containerRect = container.getBoundingClientRect();
-          
-          const visibleTop = Math.max(rect.top, containerRect.top);
-          const visibleBottom = Math.min(rect.bottom, containerRect.bottom);
-          const visibleHeight = Math.max(0, visibleBottom - visibleTop);
-          
-          if (visibleHeight > maxVisibleArea) {
-            maxVisibleArea = visibleHeight;
-            maxVisiblePage = index + 1;
-          }
-        });
-        
-        if (maxVisiblePage !== document.currentPage) {
-          setCurrentPage(maxVisiblePage);
-        }
-
-        // 加载可见区域附近的页面
-        const startPage = Math.max(1, maxVisiblePage - 2);
-        const endPage = Math.min(pages.length, maxVisiblePage + 2);
-        
-        const pagesToLoad: number[] = [];
-        for (let i = startPage; i <= endPage; i++) {
-          if (!loadedPages.has(i)) {
-            pagesToLoad.push(i);
-          }
-        }
-        
-        if (pagesToLoad.length > 0) {
-          renderQueueRef.current = [...renderQueueRef.current, ...pagesToLoad];
-          processRenderQueue();
-        }
+        loadVisiblePages();
       }, 100);
     };
 
@@ -140,9 +159,86 @@ export default function PDFViewer({ document }: PDFViewerProps) {
       container.removeEventListener('scroll', handleScroll);
       clearTimeout(scrollTimeout);
     };
-  }, [document.currentPage, pages.length, loadedPages, setCurrentPage, processRenderQueue]);
+  }, [loadVisiblePages]);
 
-  // 跳转到指定页面
+  // Pinch zoom handler (macOS trackpad + mouse wheel)
+  useEffect(() => {
+    const applyVisualScale = (scale: number) => {
+      const clamped = Math.max(0.25, Math.min(5, scale));
+      pendingVisualScaleRef.current = clamped;
+      const el = getContainerEl();
+      if (el) {
+        el.style.transform = `scale(${clamped / document.scale})`;
+        el.style.transformOrigin = 'top center';
+      }
+      return clamped;
+    };
+
+    const commitScale = () => {
+      if (pendingVisualScaleRef.current !== null) {
+        const clamped = pendingVisualScaleRef.current;
+        setScale(clamped);
+        pendingVisualScaleRef.current = null;
+      }
+    };
+
+    const handleWheel = (e: WheelEvent) => {
+      if (isGesturingRef.current) return;
+
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        const delta = -e.deltaY;
+        const zoomFactor = Math.exp(delta * 0.002);
+        const current = pendingVisualScaleRef.current ?? document.scale;
+        applyVisualScale(current * zoomFactor);
+
+        if (pinchTimeoutRef.current) {
+          clearTimeout(pinchTimeoutRef.current);
+        }
+        pinchTimeoutRef.current = window.setTimeout(commitScale, 200);
+      }
+    };
+
+    const handleGestureStart = (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      isGesturingRef.current = true;
+      gestureStartScaleRef.current = pendingVisualScaleRef.current ?? document.scale;
+    };
+
+    const handleGestureChange = (e: any) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const newScale = gestureStartScaleRef.current * (e.scale || 1);
+      applyVisualScale(newScale);
+    };
+
+    const handleGestureEnd = (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      isGesturingRef.current = false;
+      gestureStartScaleRef.current = pendingVisualScaleRef.current ?? document.scale;
+      commitScale();
+    };
+
+    window.addEventListener('wheel', handleWheel, { passive: false, capture: true });
+    window.addEventListener('gesturestart', handleGestureStart, { passive: false, capture: true });
+    window.addEventListener('gesturechange', handleGestureChange, { passive: false, capture: true });
+    window.addEventListener('gestureend', handleGestureEnd, { passive: false, capture: true });
+
+    return () => {
+      window.removeEventListener('wheel', handleWheel, { capture: true });
+      window.removeEventListener('gesturestart', handleGestureStart, { capture: true });
+      window.removeEventListener('gesturechange', handleGestureChange, { capture: true });
+      window.removeEventListener('gestureend', handleGestureEnd, { capture: true });
+      if (pinchTimeoutRef.current) {
+        clearTimeout(pinchTimeoutRef.current);
+      }
+    };
+  }, [setScale, document.scale]);
+
+  // Jump to page
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -153,32 +249,21 @@ export default function PDFViewer({ document }: PDFViewerProps) {
     }
   }, [document.currentPage]);
 
-  // 计算带边距的页面尺寸
-  const getPageStyle = (page: PDFPage) => {
-    const scale = document.scale;
-    const padding = settings.pagePadding;
-    
-    const contentWidth = page.width * scale;
-    const contentHeight = page.height * scale;
-    
-    const totalWidth = contentWidth + padding * 2;
-    const totalHeight = contentHeight + padding * 2;
-    
-    return {
-      width: totalWidth,
-      height: totalHeight,
-      contentWidth,
-      contentHeight,
-      padding,
-    };
-  };
-
-  // 获取背景色
+  // Get background color
   const getBackgroundColor = () => {
     switch (settings.theme) {
       case 'dark': return '#1a1a1a';
       case 'sepia': return '#f4ecd8';
       default: return settings.backgroundColor;
+    }
+  };
+
+  // Theme CSS filter applied to the content wrapper
+  const getThemeFilter = () => {
+    switch (settings.theme) {
+      case 'dark': return 'invert(1) hue-rotate(180deg)';
+      case 'sepia': return 'sepia(0.85) contrast(0.95)';
+      default: return 'none';
     }
   };
 
@@ -193,59 +278,60 @@ export default function PDFViewer({ document }: PDFViewerProps) {
     );
   }
 
+  if (error) {
+    return (
+      <div className="pdf-viewer">
+        <div className="loading-state" style={{ color: '#c33' }}>
+          <div>加载失败</div>
+          <div style={{ fontSize: '14px', marginTop: '8px' }}>{error}</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!pdfDocument) {
+    return null;
+  }
+
+  const pageCount = pdfDocument.numPages;
+
   return (
-    <div 
-      className="pdf-viewer" 
+    <div
+      className="pdf-viewer"
       ref={containerRef}
       style={{ backgroundColor: getBackgroundColor() }}
     >
-      <div className="pdf-container">
-        {pages.map((page) => {
-          const style = getPageStyle(page);
-          const shouldRender = loadedPages.has(page.number);
-          
+      <div
+        className="pdf-container"
+        style={{
+          filter: getThemeFilter(),
+          transition: 'filter 0.2s ease-out',
+        }}
+      >
+        {Array.from({ length: pageCount }, (_, i) => i + 1).map((pageNumber) => {
+          const pageProxy = pageProxies.get(pageNumber);
+          const hasProxy = !!pageProxy;
+
           return (
             <div
-              key={page.number}
-              data-page-number={page.number}
-              className="pdf-page-with-margin"
+              key={pageNumber}
+              data-page-number={pageNumber}
+              className="pdf-page-wrapper"
               style={{
-                width: style.width,
-                height: style.height,
+                display: 'flex',
+                justifyContent: 'center',
                 marginBottom: '20px',
+                padding: `${settings.pagePadding}px 0`,
               }}
             >
-              <div
-                className="pdf-content-area"
-                style={{
-                  left: style.padding,
-                  bottom: style.padding,
-                  width: style.contentWidth,
-                  height: style.contentHeight,
-                }}
-              >
-                {shouldRender ? (
-                  <PDFPageComponent
-                    documentPath={document.path}
-                    pageNumber={page.number}
-                    width={style.contentWidth}
-                    height={style.contentHeight}
-                    originalWidth={page.width}
-                    originalHeight={page.height}
-                    scale={document.scale}
-                    theme={settings.theme}
-                  />
-                ) : (
-                  <PagePlaceholder 
-                    width={style.contentWidth} 
-                    height={style.contentHeight}
-                    pageNumber={page.number}
-                  />
-                )}
-              </div>
-              
-              {/* 页码指示器 */}
-              <div className="pdf-page-number">{page.number}</div>
+              {hasProxy ? (
+                <PDFPageComponent
+                  pdfPage={pageProxy!}
+                  scale={document.scale}
+                />
+              ) : (
+                <PagePlaceholder pageNumber={pageNumber} />
+              )}
             </div>
           );
         })}
@@ -254,19 +340,18 @@ export default function PDFViewer({ document }: PDFViewerProps) {
   );
 }
 
-// 页面占位符
-function PagePlaceholder({ width, height, pageNumber }: { width: number; height: number; pageNumber: number }) {
+function PagePlaceholder({ pageNumber }: { pageNumber: number }) {
   return (
-    <div 
-      style={{ 
-        width, 
-        height, 
+    <div
+      style={{
+        width: 600,
+        height: 800,
         background: '#f0f0f0',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         color: '#999',
-        fontSize: '14px'
+        fontSize: '14px',
       }}
     >
       加载中... {pageNumber}

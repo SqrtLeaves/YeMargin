@@ -20,7 +20,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # PDF 处理 - 使用 pdfium-render（Google PDFium 的 Rust 绑定）
-pdfium-render = { version = "0.8.24", features = ["thread_safe"] }
+pdfium-render = { version = "0.8.24", features = ["sync"] }
 
 # 图像处理 - 用于渲染后的处理
 image = "0.25"
@@ -38,6 +38,9 @@ uuid = { version = "1.7", features = ["v4", "serde"] }
 
 # 缓存
 lru = "0.12"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
 
 [features]
 default = ["custom-protocol"]
